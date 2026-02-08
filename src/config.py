@@ -7,10 +7,16 @@ DATA_DIR = "data"
 LMM_TENOR = 1.0
 CALIB_TENOR = 1.0 
 CORR_MODE = 'two_param' # exp, pca, two_param
-CHECK_CALIBRATION = True
+CHECK_CALIBRATION = False
+
+RFR = False
 
 # market assumptions
-RHO_OIS_EUR = 0.90 # Pallavicini
+if RFR:
+    RHO_OIS_EUR = 0.90 # Pallavicini
+else:
+    RHO_OIS_EUR = 1.0
+
 DECAY_B = 0.05
 RHO_INF = 0.03 
 PCA_FACTORS = 3.0
