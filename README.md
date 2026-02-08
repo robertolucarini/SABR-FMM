@@ -1,6 +1,6 @@
-# Multicurve SABR-LMM
+# Multicurve SABR-FMM
 
-This repository contains a Python implementation of a **Multicurve Libor Market Model (LMM)** with **SABR Stochastic Volatility**. It features a pricer for **Bermudan Swaptions** using Least Squares Monte Carlo (LSM).
+This repository contains a Python implementation of a **Multicurve Forward Market Model (FMM)** with **SABR Stochastic Volatility** as per Lyashenko, Mercurio (2019). It features a pricer for **Bermudan Swaptions** using Least Squares Monte Carlo (LSM).
 
 ## Features
 
@@ -8,7 +8,7 @@ This repository contains a Python implementation of a **Multicurve Libor Market 
 
 * **SABR Stochastic Volatility:** Each forward rate follows a (Normal) SABR process with $\beta = 0$. The model includes a calibration engine using Hagan's Normal Volatility expansion.
 
-* **Drift :** Implements the drift adjustments required for LMM with stochastic volatility, as in Mercurio 2009.
+* **Drift :** Implements the drift adjustments required for FMM with stochastic volatility, as in Mercurio 2009.
 
 * **Correlation Matrix:** Handles a $4N \times 4N$ matrix covering Rate-Rate, Vol-Vol, Skew, and Cross-Curve correlations. Supports PCA and parametric correlations (Exponential Decay or Two-Parameters).
 
