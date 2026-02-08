@@ -5,12 +5,14 @@ from src.calibration import sabr_normal_vol
 import time
 import os
 from src.config import DATA_DIR, LMM_TENOR, RHO_OIS_EUR, CHECK_CALIBRATION, STRIKE, EXERCISE_DATES, \
-    DECAY_B, CORR_MODE, RHO_INF, CALIB_TENOR
+    DECAY_B, CORR_MODE, RHO_INF, CALIB_TENOR, SIM_STEPS, SIM_PATHS, RFR
 from src.utils import load_curve, get_fwd_rates, get_sabr_params
 from src.calibration import calibrate_sabr
 from src.model import MulticurveSABR_LMM
-from src.pricers import _bermudan_swaption_pricer, get_greeks
-
+from src.pricers import bermudan_swaption_pricer, get_greeks
+import torch
+from src.torch_model import TorchSABR_LMM 
+from src.pricers import torch_bermudan_pricer
 
 if __name__ == "__main__":
     start_total = time.time()
@@ -26,15 +28,21 @@ if __name__ == "__main__":
     
     # 2. load curves
     ois_curve = load_curve(estr_file, "OIS ESTR")
-    eur_curve = load_curve(eur_file)
+    if RFR:
+        eur_curve = ois_curve
+    else:
+        eur_curve = load_curve(eur_file)
     
     # 3. forward rates
     grid_T, fwd_ois = get_fwd_rates(ois_curve, grid_tau=LMM_TENOR)
     # same grid
     _, fwd_eur = get_fwd_rates(eur_curve, grid_tau=LMM_TENOR)
-    
+    print(f"Data Loading Runtime: {time.time() - start_total:.1f} sec")
+
+    start_cali = time.time()
     # 4. SABR calibration 
     calibrated_params = get_sabr_params(vol_file, CALIB_TENOR, calibrate_sabr)
+    print(f"Calibration Runtime: {time.time() - start_cali:.1f} sec")
 
     if CHECK_CALIBRATION:
         print("\n" + "="*80)
@@ -95,7 +103,7 @@ if __name__ == "__main__":
     }
     
     res_berm = get_greeks(
-        _bermudan_swaption_pricer, 
+        bermudan_swaption_pricer, 
         bermudan_specs, 
         MulticurveSABR_LMM, 
         grid_T, 
@@ -106,26 +114,70 @@ if __name__ == "__main__":
         RHO_OIS_EUR 
     )
     
+
     # ==========================================
-    # FINAL REPORT
+    # PYTORCH AAD PRICING
     # ==========================================
     print("\n" + "="*80)
-    print(f"{'VALUATION REPORT':^80}")
+    print(f"{'PRICING':^80}")
     print("="*80)
-    
-    def print_row(label, val1, is_money=False):
-        fmt = "{:>12.2f}" if is_money else "{:>12.6f}"
-        print(f"{label:<20} | {fmt.format(val1)}")
 
-    print(f"{'Metric':<20} | {'Bermudan':>12} ")
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Running on device: {device.upper()}")
+
+    start_aad = time.time()
+
+    # initialize AAD model
+    aad_model = TorchSABR_LMM(
+        tenors=grid_T,
+        F_ois=fwd_ois,
+        F_eur=fwd_eur,
+        sabr_params=sabr_list,
+        rate_corr_matrix=rate_corr,
+        rho_cross=RHO_OIS_EUR,
+        device=device
+    )
+
+    # specs
+    aad_specs = bermudan_specs.copy()
+
+    # price
+    aad_price = torch_bermudan_pricer(
+        model=aad_model, 
+        trade_specs=aad_specs, 
+        M_steps=SIM_STEPS, 
+        n_paths=SIM_PATHS
+    )
+
+    # greeks -> backward pass
+    aad_price.backward()    
+    end_aad = time.time()
+   
+    # OIS Delta
+    ois_delta_bucketed = aad_model.F0_ois.grad.cpu().numpy()
+    total_ois_delta = np.sum(ois_delta_bucketed)
+
+    # EUR Delta
+    eur_delta_bucketed = aad_model.F0_eur.grad.cpu().numpy()
+    total_eur_delta = np.sum(eur_delta_bucketed)
+
+    # Vega
+    vega_bucketed = aad_model.alphas.grad.cpu().numpy()
+    total_vega = np.sum(vega_bucketed)
+
     print("-" * 60)
-    
-    # Scale numbers for display (bps or cents)
-    print_row("Bermudan (bps)", res_berm['Base']*10000, True)
-    print_row("OIS Delta (PV01)", res_berm['OIS_Delta']*10000, True)
-    print_row("EUR Delta (PV01)", res_berm['EUR_Delta']*10000, True)
-    print_row("Vega (1bp)", res_berm['Vega']*10000, True)
-    
+    print(f"{'Metric':<20} | {'AAD':>12} | {'Standard':>15}")
     print("-" * 60)
-    print(f"Total Runtime: {time.time() - start_total:.1f} sec")
+
+    ois_pv01 = total_ois_delta * 0.0001
+    eur_pv01 = total_eur_delta * 0.0001
+    vega_1bp = total_vega * 0.0001
+    
+    print(f"{'Price (bps)':<20} | {aad_price*10000:>12.2f} | {res_berm['Base']*10000:>15.2f}")
+    print(f"{'OIS Delta (PV01)':<20} | {ois_pv01*10000:>12.2f} | {res_berm['OIS_Delta']*10000:>15.2f}")
+    print(f"{'EUR Delta (PV01)':<20} | {eur_pv01*10000:>12.2f} | {res_berm['EUR_Delta']*10000:>15.2f}")
+    print(f"{'Vega':<20} | {vega_1bp*10000:>12.2f} | {res_berm['Vega']*10000:>15.2f}")
+  
+    print("-" * 60)
+    print(f"AAD Runtime: {end_aad - start_aad:.4f} sec")
     print("="*60)

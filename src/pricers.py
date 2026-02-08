@@ -1,8 +1,10 @@
 import numpy as np
-from src.config import SIM_STEPS, SIM_PATHS, SEED, RNG_TYPE, ANTITHETIC_VAR, B_BRIDGE, BUMP_DELTA, BUMP_VOL
+from src.config import SIM_STEPS, SIM_PATHS, RHO_OIS_EUR, SEED, RNG_TYPE, ANTITHETIC_VAR, B_BRIDGE, BUMP_DELTA, BUMP_VOL
+import torch
+import torch.nn as nn
 
 
-def _bermudan_swaption_pricer(model, paths_ois, paths_eur, time_grid, trade_specs):
+def bermudan_swaption_pricer(model, paths_ois, paths_eur, time_grid, trade_specs):
     # unpack specs
     strike = trade_specs['Strike']
     dates = trade_specs['Ex_Dates']
@@ -99,7 +101,7 @@ def _bermudan_swaption_pricer(model, paths_ois, paths_eur, time_grid, trade_spec
     
     return berm_mc_price
 
-def get_greeks(pricer_func, trade_specs, model_cls, grid_T, fwd_ois, fwd_eur,sabr_p, rate_corr, cross_rho):
+def get_greeks(pricer_func, trade_specs, model_cls, grid_T, fwd_ois, fwd_eur,sabr_p, rate_corr, cross_rho=RHO_OIS_EUR):
           
     # instantiate model
     model = model_cls(grid_T, fwd_ois, fwd_eur, sabr_p, rate_corr, cross_rho)
@@ -144,3 +146,94 @@ def get_greeks(pricer_func, trade_specs, model_cls, grid_T, fwd_ois, fwd_eur,sab
     model.update_params(sabr_params = sabr_p)
     
     return res
+
+def torch_bermudan_pricer(model, trade_specs, M_steps=SIM_STEPS, n_paths=SIM_PATHS):
+    # simulate rates
+    time_grid, paths_ois, paths_eur = model.simulate(M_steps, n_paths)
+    
+    strike = trade_specs['Strike']
+    ex_dates = torch.tensor(trade_specs['Ex_Dates'], device=model.device)
+    
+    # map dates to steps
+    ex_steps = []
+    for t in ex_dates:
+        dist = torch.abs(time_grid - t)
+        ex_steps.append(torch.argmin(dist))
+        
+    n_paths = paths_ois.shape[0]
+    
+    # cashflows -> V(t) / P(t, T_N)
+    deflated_cashflows = torch.zeros(n_paths, device=model.device, dtype=torch.float64)
+    
+    # backwards induction
+    for i in range(len(ex_steps) - 1, -1, -1):
+        step = ex_steps[i]
+        
+        # tenors
+        t_val = time_grid[step]
+        k_start = int(torch.sum(model.T[:-1] <= t_val).item())
+        
+        # rates
+        f_ois_t = paths_ois[:, step, :]
+        f_eur_t = paths_eur[:, step, :]
+        # dt
+        taus = model.tau[k_start:]
+        
+        # Numeraire Ratio: P(t, T_N) / P(t, T_start) 
+        # -> discount factor from T_N back to current time t
+        curve_dfs = 1.0 / (1.0 + taus * f_ois_t[:, k_start:])
+        
+        # (Paths, Tenors) -> discount to T_N (last tenor)
+        p_t_Tn = torch.prod(curve_dfs, dim=1)
+        
+        # cumulative disc fator
+        swap_dfs = torch.cumprod(curve_dfs, dim=1)
+        # swap payoff
+        swap_val = torch.sum(swap_dfs * (f_eur_t[:, k_start:] - strike) * taus, dim=1)
+        
+        # option intrinsic value
+        intrinsic = torch.maximum(swap_val, torch.tensor(0.0, device=model.device))
+        
+        # deflate to Terminal Measure -> P(t, T_N)
+        intrinsic_deflated = intrinsic / p_t_Tn
+        
+        # regression
+        if i == len(ex_steps) - 1:
+            # last period continuation value is zer0
+            continuation_deflated = torch.zeros(n_paths, device=model.device)
+        else:
+            annuity = torch.sum(swap_dfs * taus, dim=1)
+            par_rate = torch.sum(swap_dfs * f_eur_t[:, k_start:] * taus, dim=1) / annuity
+            # state variables
+            X0 = torch.ones(n_paths, device=model.device)
+            X1 = par_rate
+            X2 = par_rate**2
+            X3 = par_rate * annuity
+            # basis function
+            X = torch.stack([X0, X1, X2, X3], dim=1)
+            
+            # in-the-money mask
+            itm_mask = intrinsic_deflated > 0
+            
+            if itm_mask.sum() > 50:
+                X_itm = X[itm_mask].detach() 
+                Y_itm = deflated_cashflows[itm_mask].detach()
+                # least-squares                
+                sol = torch.linalg.lstsq(X_itm, Y_itm).solution
+                continuation_deflated = torch.zeros(n_paths, device=model.device)
+                # continuation value as basis function * reg coeffs
+                continuation_deflated[itm_mask] = X[itm_mask] @ sol
+            else:
+                continuation_deflated = torch.zeros(n_paths, device=model.device)
+
+        # decision mask
+        do_ex = intrinsic_deflated > continuation_deflated
+        
+        # update -> if exercise, take intrinsic else keep previous
+        deflated_cashflows = torch.where(do_ex, intrinsic_deflated, deflated_cashflows)
+
+    # disc factor from maturity
+    p_0_Tn = model.get_terminal_bond()
+    
+    # discount using terminal measure
+    return p_0_Tn * torch.mean(deflated_cashflows)
