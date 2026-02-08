@@ -8,8 +8,7 @@ from src.utils import _run_pca
 class MulticurveSABR_LMM:
     def __init__(self, tenors, F_ois, F_eur, sabr_params, rate_corr_matrix, 
                  rho_cross=RHO_OIS_EUR, rate_corr_mode=CORR_MODE, n_factors=PCA_FACTORS):
-        # way faster than 64
-        self.dtype = np.float32
+        self.dtype = np.float64
         # times
         self.T = np.array(tenors, dtype=self.dtype)
         # year fraction
