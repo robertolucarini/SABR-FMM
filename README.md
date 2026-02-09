@@ -4,7 +4,7 @@ This repository contains a Python implementation of a **Multicurve Forward Marke
 
 ## Features
 
-* **Multicurve Framework:** Explicit separation of OIS (discounting) and EUR-IBOR (forward projection) curves with deterministic basis spreads.
+* **Multicurve Framework:** Explicit separation of OIS (discounting) and Coumpounded-OIS (forward projection) curves with deterministic basis spreads.
 
 * **SABR Stochastic Volatility:** Each forward rate follows a (Normal) SABR process with $\beta = 0$. The model includes a calibration engine using Hagan's Normal Volatility expansion.
 
